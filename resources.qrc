@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/">
         <file alias="/fonts/roboto.ttf">src/fonts/roboto.ttf</file>
+        <file>src/BrandLogo.qml</file>
     </qresource>
 </RCC>

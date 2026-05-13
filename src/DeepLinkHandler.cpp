@@ -1,5 +1,6 @@
 #include "DeepLinkHandler.h"
 
+#include <QUuid>
 #include <QUrlQuery>
 
 DeepLinkHandler::DeepLinkHandler(QObject *parent)
@@ -49,6 +50,24 @@ bool DeepLinkHandler::processUrl(const QString &urlString)
     return false;
   }
   return processUrlInternal(url);
+}
+
+void DeepLinkHandler::seedSelfInitiated(const QString &clientId)
+{
+  const QString trimmed = clientId.trimmed();
+  if (trimmed.isEmpty())
+  {
+    setError(QStringLiteral("Self-initiated login requires a non-empty clientId"));
+    return;
+  }
+
+  m_clientId = trimmed;
+  m_redirectUri = QStringLiteral("http://localhost:%1/callback").arg(m_callbackPort);
+  m_state = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  m_lastError.clear();
+
+  emit payloadChanged();
+  emit errorChanged();
 }
 
 QUrl DeepLinkHandler::buildAuthStartUrl(const QString &baseUrl, const QString &authStartPath) const
@@ -110,9 +129,9 @@ bool DeepLinkHandler::processUrlInternal(const QUrl &url)
   }
 
   const QUrlQuery query(url);
-  const QString clientId = query.queryItemValue(m_clientIdKey);
-  const QString redirectUri = query.queryItemValue(m_redirectUriKey);
-  const QString state = query.queryItemValue(m_stateKey);
+  const QString clientId = query.queryItemValue(m_clientIdKey, QUrl::FullyDecoded);
+  const QString redirectUri = query.queryItemValue(m_redirectUriKey, QUrl::FullyDecoded);
+  const QString state = query.queryItemValue(m_stateKey, QUrl::FullyDecoded);
 
   if (clientId.isEmpty() || redirectUri.isEmpty() || state.isEmpty())
   {

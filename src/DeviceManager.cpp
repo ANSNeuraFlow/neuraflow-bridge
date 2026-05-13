@@ -1,11 +1,48 @@
 #include "DeviceManager.h"
 
 #include <QDataStream>
-#include <QSerialPortInfo>
-#include <QSerialPort>
 #include <QDateTime>
+#include <QDebug>
+#include <QDir>
 #include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QSerialPort>
+#include <QSerialPortInfo>
 #include <QTimer>
+
+#include <cmath>
+
+namespace
+{
+  constexpr char kCmdSoftReset = 'v';
+  constexpr char kCmdDefaultChannels = 'd';
+  constexpr char kCmdEightChannels = 'c';
+  constexpr char kCmdStartStream = 'b';
+  constexpr char kCmdStopStream = 's';
+
+  constexpr quint8 kPacketHeader = 0xA0;
+  constexpr int kPacketSize = 33;
+
+  // ADS1299 default gain 24: uV per count = 4.5 / gain / (2^23 - 1) * 1e6
+  constexpr double kMicrovoltsPerCountGain24 =
+      (4.5 / 24.0 / static_cast<double>((1 << 23) - 1)) * 1e6;
+
+  constexpr double kSyntheticSampleRateHz = 100.0;
+  constexpr double kCytonDefaultSampleRateHz = 250.0;
+
+  QString normalizedSerialPath(const QString &portName)
+  {
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+    if (portName.startsWith(QStringLiteral("/dev/")))
+    {
+      return portName;
+    }
+    return QStringLiteral("/dev/") + portName;
+#else
+    return portName;
+#endif
+  }
+} // namespace
 
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent),
@@ -13,13 +50,16 @@ DeviceManager::DeviceManager(QObject *parent)
       m_frameTimer(new QTimer(this)),
       m_connected(false),
       m_streaming(false),
+      m_debugMode(false),
       m_sequence(0)
 {
   m_frameTimer->setInterval(10);
   connect(m_frameTimer, &QTimer::timeout, this, [this]()
           { emit frameReady(buildSyntheticFrame()); });
 
-  refreshPorts();
+  connect(m_serialPort, &QSerialPort::readyRead, this, &DeviceManager::onSerialReadyRead);
+
+  setEffectiveSampleRateHz(kSyntheticSampleRateHz);
 }
 
 QStringList DeviceManager::availablePorts() const
@@ -42,14 +82,98 @@ bool DeviceManager::streaming() const
   return m_streaming;
 }
 
+bool DeviceManager::debugMode() const
+{
+  return m_debugMode;
+}
+
+QStringList DeviceManager::collectCytonPorts() const
+{
+  static const QStringList kDongleDescPrefixes = {
+      QStringLiteral("FT231X USB UART"),
+      QStringLiteral("VCP"),
+  };
+
+  QStringList results;
+
+  const auto infos = QSerialPortInfo::availablePorts();
+  for (const QSerialPortInfo &info : infos)
+  {
+    const QString desc = info.description();
+    bool matchesDongle = false;
+    for (const QString &prefix : kDongleDescPrefixes)
+    {
+      if (desc.startsWith(prefix))
+      {
+        matchesDongle = true;
+        break;
+      }
+    }
+    if (!matchesDongle)
+    {
+      continue;
+    }
+
+    QString sysName = info.portName();
+#if defined(Q_OS_MACOS)
+    if (sysName.startsWith(QStringLiteral("tty")))
+    {
+      continue;
+    }
+#endif
+    const QString path = normalizedSerialPath(sysName);
+    if (!results.contains(path))
+    {
+      results.append(path);
+    }
+  }
+
+#if defined(Q_OS_LINUX)
+  if (m_debugMode)
+  {
+    QDir devDir(QStringLiteral("/dev"));
+    const QStringList devEntries = devDir.entryList(QDir::System | QDir::NoDotAndDotDot);
+    for (const QString &name : devEntries)
+    {
+      if (name.startsWith(QStringLiteral("tnt")))
+      {
+        const QString path = QStringLiteral("/dev/") + name;
+        if (!results.contains(path))
+        {
+          results.append(path);
+          qDebug() << "DeviceManager: DEBUG virtual tty0tty-style port" << path;
+        }
+      }
+    }
+  }
+#endif
+
+  return results;
+}
+
+bool DeviceManager::isSyntheticDebugPort() const
+{
+#if defined(Q_OS_LINUX)
+  return m_debugMode && m_selectedPort.contains(QStringLiteral("/tnt"));
+#else
+  Q_UNUSED(this);
+  return false;
+#endif
+}
+
+void DeviceManager::setDebugMode(bool debug)
+{
+  if (m_debugMode != debug)
+  {
+    m_debugMode = debug;
+    emit debugModeChanged();
+  }
+  refreshPorts();
+}
+
 void DeviceManager::refreshPorts()
 {
-  QStringList ports;
-  const auto serialPorts = QSerialPortInfo::availablePorts();
-  for (const QSerialPortInfo &info : serialPorts)
-  {
-    ports.append(info.portName());
-  }
+  const QStringList ports = collectCytonPorts();
 
   if (m_availablePorts == ports)
   {
@@ -64,6 +188,181 @@ void DeviceManager::refreshPorts()
     m_selectedPort = m_availablePorts.first();
     emit selectedPortChanged();
   }
+}
+
+bool DeviceManager::autoConnect()
+{
+  refreshPorts();
+
+  if (m_availablePorts.isEmpty())
+  {
+    emit statusMessage(QStringLiteral("No Cyton dongles found"));
+    return false;
+  }
+
+  setSelectedPort(m_availablePorts.first());
+  return connectDevice();
+}
+
+void DeviceManager::resetProtocolState()
+{
+  m_rxBuffer.clear();
+  m_textAccumulator.clear();
+  m_protocolState = ProtocolState::Idle;
+}
+
+void DeviceManager::setBoardReady(bool ready)
+{
+  if (m_boardReady == ready)
+  {
+    return;
+  }
+  m_boardReady = ready;
+  emit boardReadyChanged();
+}
+
+void DeviceManager::setFirmwareVersion(const QString &v)
+{
+  if (m_firmwareVersion == v)
+  {
+    return;
+  }
+  m_firmwareVersion = v;
+  emit firmwareVersionChanged();
+}
+
+void DeviceManager::setConnectionStatus(const QString &status)
+{
+  if (m_connectionStatus == status)
+  {
+    return;
+  }
+  m_connectionStatus = status;
+  emit connectionStatusChanged();
+}
+
+void DeviceManager::setEffectiveSampleRateHz(double hz)
+{
+  if (std::fabs(m_effectiveSampleRateHz - hz) < 1e-9)
+  {
+    return;
+  }
+  m_effectiveSampleRateHz = hz;
+  emit effectiveSampleRateHzChanged();
+}
+
+void DeviceManager::sendByte(char cmd)
+{
+  if (!m_serialPort->isOpen())
+  {
+    return;
+  }
+  const QByteArray payload(1, cmd);
+  m_serialPort->write(payload);
+  m_serialPort->flush();
+}
+
+void DeviceManager::appendSerial(const QByteArray &data)
+{
+  if (data.isEmpty())
+  {
+    return;
+  }
+  m_rxBuffer.append(data);
+  processRxBuffer();
+}
+
+void DeviceManager::processRxBuffer()
+{
+  if (m_protocolState == ProtocolState::Streaming)
+  {
+    drainBinaryPackets();
+    return;
+  }
+
+  handleTextPhase();
+}
+
+void DeviceManager::handleTextPhase()
+{
+  QString chunk;
+  while (tryConsumeTextUntilEot(&chunk))
+  {
+    if (m_protocolState == ProtocolState::WaitingBanner)
+    {
+      onBannerComplete(chunk);
+    }
+    else if (m_protocolState == ProtocolState::WaitingDefaultAck)
+    {
+      onDefaultSettingsAck(chunk);
+    }
+  }
+}
+
+bool DeviceManager::tryConsumeTextUntilEot(QString *outChunk)
+{
+  static const QByteArray kEot("$$$");
+
+  const int idx = m_rxBuffer.indexOf(kEot);
+  if (idx < 0)
+  {
+    return false;
+  }
+
+  const QByteArray rawLine = m_rxBuffer.left(idx + kEot.size());
+  m_rxBuffer.remove(0, idx + kEot.size());
+
+  QString text = QString::fromLatin1(rawLine);
+  text.remove(QStringLiteral("$$$"));
+
+  if (outChunk)
+  {
+    *outChunk = text;
+  }
+  return true;
+}
+
+void DeviceManager::onBannerComplete(const QString &chunk)
+{
+  static const QRegularExpression kFwRegex(
+      QStringLiteral(R"(Firmware:\s*(v[\d.]+))"),
+      QRegularExpression::CaseInsensitiveOption);
+
+  const auto match = kFwRegex.match(chunk);
+  if (match.hasMatch())
+  {
+    setFirmwareVersion(match.captured(1));
+  }
+  else
+  {
+    setFirmwareVersion(QString());
+  }
+
+  m_protocolState = ProtocolState::WaitingDefaultAck;
+  sendByte(kCmdDefaultChannels);
+  setConnectionStatus(QStringLiteral("Applying default channel settings…"));
+  emit statusMessage(QStringLiteral("Cyton ready; applying default channel settings"));
+}
+
+void DeviceManager::onDefaultSettingsAck(const QString &chunk)
+{
+  Q_UNUSED(chunk);
+  // Align with OpenBCI GUI: prefer 8-channel mode when Daisy may be present.
+  sendByte(kCmdEightChannels);
+
+  m_protocolState = ProtocolState::Ready;
+  setBoardReady(true);
+  setConnectionStatus(QStringLiteral("Board ready"));
+  emit statusMessage(QStringLiteral("Cyton configured (default channels, 8ch mode)"));
+}
+
+void DeviceManager::onSerialReadyRead()
+{
+  if (!m_serialPort->isOpen())
+  {
+    return;
+  }
+  appendSerial(m_serialPort->readAll());
 }
 
 bool DeviceManager::connectDevice()
@@ -84,17 +383,43 @@ bool DeviceManager::connectDevice()
     m_serialPort->close();
   }
 
+  resetProtocolState();
+  setBoardReady(false);
+  setFirmwareVersion(QString());
+
   m_serialPort->setPortName(m_selectedPort);
   m_serialPort->setBaudRate(115200);
+  m_serialPort->setDataBits(QSerialPort::Data8);
+  m_serialPort->setParity(QSerialPort::NoParity);
+  m_serialPort->setStopBits(QSerialPort::OneStop);
+  m_serialPort->setFlowControl(QSerialPort::NoFlowControl);
+
   if (!m_serialPort->open(QIODevice::ReadWrite))
   {
     emit statusMessage(QStringLiteral("Failed to open serial port %1: %2").arg(m_selectedPort, m_serialPort->errorString()));
+    setConnectionStatus(QStringLiteral("Open failed"));
     return false;
   }
 
   m_connected = true;
   emit connectedChanged();
-  emit statusMessage(QStringLiteral("Device connected on %1").arg(m_selectedPort));
+
+  if (isSyntheticDebugPort())
+  {
+    setEffectiveSampleRateHz(kSyntheticSampleRateHz);
+    m_protocolState = ProtocolState::Ready;
+    setBoardReady(true);
+    setConnectionStatus(QStringLiteral("Debug port (synthetic stream)"));
+    emit statusMessage(QStringLiteral("Connected to debug port %1 — synthetic EEG when streaming").arg(m_selectedPort));
+    return true;
+  }
+
+  setEffectiveSampleRateHz(kCytonDefaultSampleRateHz);
+  m_protocolState = ProtocolState::WaitingBanner;
+  setConnectionStatus(QStringLiteral("Waiting for board…"));
+  emit statusMessage(QStringLiteral("Serial open; soft-reset (v)…"));
+
+  sendByte(kCmdSoftReset);
   return true;
 }
 
@@ -110,7 +435,14 @@ void DeviceManager::disconnectDevice()
     stopStream();
   }
 
+  m_frameTimer->stop();
   m_connected = false;
+  setBoardReady(false);
+  setFirmwareVersion(QString());
+  resetProtocolState();
+  setConnectionStatus(QStringLiteral("Disconnected"));
+  setEffectiveSampleRateHz(kSyntheticSampleRateHz);
+
   if (m_serialPort->isOpen())
   {
     m_serialPort->close();
@@ -127,16 +459,37 @@ bool DeviceManager::startStream()
     return false;
   }
 
+  if (!m_boardReady)
+  {
+    emit statusMessage(QStringLiteral("Board not ready yet"));
+    return false;
+  }
+
   if (m_streaming)
   {
     return true;
   }
 
-  m_streaming = true;
   m_sequence = 0;
-  m_frameTimer->start();
+
+  if (isSyntheticDebugPort())
+  {
+    m_streaming = true;
+    m_frameTimer->start();
+    emit streamingChanged();
+    setConnectionStatus(QStringLiteral("Streaming (synthetic)"));
+    emit statusMessage(QStringLiteral("Synthetic stream started"));
+    return true;
+  }
+
+  sendByte(kCmdStartStream);
+  m_protocolState = ProtocolState::Streaming;
+  m_rxBuffer.clear();
+
+  m_streaming = true;
   emit streamingChanged();
-  emit statusMessage(QStringLiteral("Device stream started"));
+  setConnectionStatus(QStringLiteral("Streaming"));
+  emit statusMessage(QStringLiteral("Cyton stream started (b)"));
   return true;
 }
 
@@ -147,9 +500,30 @@ void DeviceManager::stopStream()
     return;
   }
 
-  m_streaming = false;
   m_frameTimer->stop();
+
+  if (m_serialPort->isOpen() && !isSyntheticDebugPort())
+  {
+    sendByte(kCmdStopStream);
+  }
+
+  m_streaming = false;
   emit streamingChanged();
+
+  if (m_connected && m_boardReady)
+  {
+    if (isSyntheticDebugPort())
+    {
+      setConnectionStatus(QStringLiteral("Debug port ready"));
+    }
+    else
+    {
+      m_protocolState = ProtocolState::Ready;
+      m_rxBuffer.clear();
+      setConnectionStatus(QStringLiteral("Board ready"));
+    }
+  }
+
   emit statusMessage(QStringLiteral("Device stream stopped"));
 }
 
@@ -162,6 +536,102 @@ void DeviceManager::setSelectedPort(const QString &portName)
 
   m_selectedPort = portName;
   emit selectedPortChanged();
+}
+
+qint32 DeviceManager::interpret24bitSignedMsbFirst(const char *bytes)
+{
+  quint32 u =
+      (static_cast<quint8>(bytes[0]) << 16) |
+      (static_cast<quint8>(bytes[1]) << 8) |
+      static_cast<quint8>(bytes[2]);
+
+  qint32 v = static_cast<qint32>(u & 0x00FFFFFFu);
+  if ((v & 0x00800000) != 0)
+  {
+    v |= static_cast<qint32>(0xFF000000);
+  }
+  return v;
+}
+
+bool DeviceManager::parseCytonPacket(const QByteArray &packet, QByteArray *outFrame)
+{
+  if (!outFrame || packet.size() != kPacketSize)
+  {
+    return false;
+  }
+
+  const quint8 footer = static_cast<quint8>(packet.at(kPacketSize - 1));
+  if (footer < 0xC0 || footer > 0xCF)
+  {
+    return false;
+  }
+
+  QByteArray frame;
+  frame.reserve(static_cast<int>(sizeof(qint64) + sizeof(quint32) + 8 * sizeof(float)));
+
+  QDataStream stream(&frame, QIODevice::WriteOnly);
+  stream.setByteOrder(QDataStream::LittleEndian);
+
+  const qint64 timestampMs = QDateTime::currentMSecsSinceEpoch();
+  const quint32 seq = static_cast<quint8>(packet.at(1));
+
+  stream << timestampMs << seq;
+
+  int offset = 2;
+  for (int ch = 0; ch < 8; ++ch)
+  {
+    const qint32 counts = interpret24bitSignedMsbFirst(packet.constData() + offset);
+    offset += 3;
+    const float microvolts = static_cast<float>(static_cast<double>(counts) * kMicrovoltsPerCountGain24);
+    stream << microvolts;
+  }
+
+  *outFrame = frame;
+  return true;
+}
+
+void DeviceManager::drainBinaryPackets()
+{
+  while (true)
+  {
+    const int start = m_rxBuffer.indexOf(static_cast<char>(kPacketHeader));
+    if (start < 0)
+    {
+      if (m_rxBuffer.size() > 4096)
+      {
+        m_rxBuffer.clear();
+      }
+      break;
+    }
+
+    if (start > 0)
+    {
+      m_rxBuffer.remove(0, start);
+    }
+
+    if (m_rxBuffer.size() < kPacketSize)
+    {
+      break;
+    }
+
+    const QByteArray candidate = m_rxBuffer.left(kPacketSize);
+    const quint8 footer = static_cast<quint8>(candidate.at(kPacketSize - 1));
+    if (footer < 0xC0 || footer > 0xCF)
+    {
+      m_rxBuffer.remove(0, 1);
+      continue;
+    }
+
+    QByteArray frame;
+    if (!parseCytonPacket(candidate, &frame))
+    {
+      m_rxBuffer.remove(0, 1);
+      continue;
+    }
+
+    m_rxBuffer.remove(0, kPacketSize);
+    emit frameReady(frame);
+  }
 }
 
 QByteArray DeviceManager::buildSyntheticFrame()

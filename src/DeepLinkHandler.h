@@ -24,6 +24,7 @@ public:
 
   Q_INVOKABLE void processArguments(const QStringList &arguments);
   Q_INVOKABLE bool processUrl(const QString &urlString);
+  Q_INVOKABLE void seedSelfInitiated(const QString &clientId);
   Q_INVOKABLE QUrl buildAuthStartUrl(const QString &baseUrl, const QString &authStartPath) const;
 
   QString clientId() const;
