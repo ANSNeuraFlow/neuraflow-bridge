@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QMetaObject>
 #include <QSysInfo>
 
 #include "AuthManager.h"
@@ -32,6 +33,7 @@ SessionManager::SessionManager(AuthManager *authManager,
                                BridgeDeviceClient *bridgeDeviceClient,
                                TokenStore *tokenStore,
                                DeepLinkHandler *deepLinkHandler,
+                               const QVariantMap &bridgeRuntimeSettings,
                                QObject *parent)
     : QObject(parent),
       m_authManager(authManager),
@@ -40,28 +42,32 @@ SessionManager::SessionManager(AuthManager *authManager,
       m_bridgeDeviceClient(bridgeDeviceClient),
       m_tokenStore(tokenStore),
       m_deepLinkHandler(deepLinkHandler),
-      m_state(QStringLiteral("idle"))
+      m_bridgeApiSettings(bridgeRuntimeSettings),
+      m_state(QStringLiteral("idle")),
+      m_autoConnectOnStartup(bridgeRuntimeSettings.value(QStringLiteral("autoConnectOnStartup")).toBool()),
+      m_autoConnectStartupDone(false)
 {
   connect(m_authManager, &AuthManager::authStateChanged, this, &SessionManager::stateChanged);
+  connect(m_authManager, &AuthManager::authStateChanged, this, &SessionManager::notifyUiStateChanged);
   connect(m_authManager, &AuthManager::statusMessageChanged, this, [this]()
           { setStatusMessage(m_authManager->statusMessage()); });
   connect(m_authManager, &AuthManager::authenticatedChanged, this, &SessionManager::authenticatedChanged);
+  connect(m_authManager, &AuthManager::authenticatedChanged, this, &SessionManager::notifyUiStateChanged);
+  connect(m_authManager, &AuthManager::authenticatedChanged, this, &SessionManager::handleAuthenticatedForAutoConnect);
+  connect(m_authManager, &AuthManager::authFailed, this, &SessionManager::notifyUiStateChanged);
 
   connect(m_deviceManager, &DeviceManager::availablePortsChanged, this, &SessionManager::availablePortsChanged);
   connect(m_deviceManager, &DeviceManager::selectedPortChanged, this, &SessionManager::selectedPortChanged);
   connect(m_deviceManager, &DeviceManager::connectedChanged, this, &SessionManager::deviceConnectedChanged);
   connect(m_deviceManager, &DeviceManager::streamingChanged, this, &SessionManager::stateChanged);
+  connect(m_deviceManager, &DeviceManager::streamingChanged, this, &SessionManager::deviceStreamingChanged);
   connect(m_deviceManager, &DeviceManager::statusMessage, this, &SessionManager::setStatusMessage);
+  connect(m_deviceManager, &DeviceManager::boardReadyChanged, this, &SessionManager::boardReadyChanged);
+  connect(m_deviceManager, &DeviceManager::firmwareVersionChanged, this, &SessionManager::firmwareVersionChanged);
+  connect(m_deviceManager, &DeviceManager::connectionStatusChanged, this, &SessionManager::connectionStatusChanged);
 
   connect(m_streamUploader, &StreamUploader::connectedChanged, this, &SessionManager::streamConnectedChanged);
   connect(m_streamUploader, &StreamUploader::statusMessage, this, &SessionManager::setStatusMessage);
-
-  connect(m_deviceManager, &DeviceManager::frameReady, this, [this](const QByteArray &frame)
-          {
-    if (m_streamUploader)
-    {
-      m_streamUploader->enqueueFrame(frame);
-    } });
 
   connect(m_bridgeDeviceClient, &BridgeDeviceClient::registerSucceeded, this, [this](const QString &deviceId)
           { setStatusMessage(QStringLiteral("Bridge device registered: %1").arg(deviceId)); });
@@ -87,6 +93,15 @@ SessionManager::SessionManager(AuthManager *authManager,
 
   connect(m_bridgeDeviceClient, &BridgeDeviceClient::listSucceeded, this, [this](const QStringList &deviceIds)
           { setStatusMessage(QStringLiteral("Known bridge devices: %1").arg(deviceIds.join(QStringLiteral(", ")))); });
+
+  if (m_deepLinkHandler)
+  {
+    connect(m_deepLinkHandler, &DeepLinkHandler::payloadChanged, this, &SessionManager::autoLoginIfReady);
+  }
+
+  notifyUiStateChanged();
+
+  QMetaObject::invokeMethod(this, &SessionManager::handleAuthenticatedForAutoConnect, Qt::QueuedConnection);
 }
 
 QString SessionManager::state() const
@@ -104,6 +119,30 @@ QString SessionManager::state() const
     return QStringLiteral("device_connected");
   }
   return m_state;
+}
+
+QString SessionManager::uiState() const
+{
+  if (authenticated())
+  {
+    return QStringLiteral("ready");
+  }
+  if (!m_authManager)
+  {
+    return QStringLiteral("splash");
+  }
+
+  const QString authState = m_authManager->authState();
+  if (authState == QStringLiteral("waiting_callback") || authState == QStringLiteral("exchanging_token"))
+  {
+    return QStringLiteral("authenticating");
+  }
+  if (authState == QStringLiteral("error"))
+  {
+    return QStringLiteral("error");
+  }
+
+  return QStringLiteral("splash");
 }
 
 QString SessionManager::statusMessage() const
@@ -131,29 +170,95 @@ bool SessionManager::deviceConnected() const
   return m_deviceManager && m_deviceManager->connected();
 }
 
+bool SessionManager::deviceStreaming() const
+{
+  return m_deviceManager && m_deviceManager->streaming();
+}
+
+bool SessionManager::boardReady() const
+{
+  return m_deviceManager && m_deviceManager->boardReady();
+}
+
+QString SessionManager::firmwareVersion() const
+{
+  return m_deviceManager ? m_deviceManager->firmwareVersion() : QString();
+}
+
+QString SessionManager::connectionStatus() const
+{
+  return m_deviceManager ? m_deviceManager->connectionStatus() : QStringLiteral("Disconnected");
+}
+
 bool SessionManager::streamConnected() const
 {
   return m_streamUploader && m_streamUploader->connected();
 }
 
-void SessionManager::beginLogin(const QVariantMap &bridgeApiSettings)
+void SessionManager::notifyUiStateChanged()
 {
+  emit uiStateChanged();
+}
+
+void SessionManager::autoLoginIfReady()
+{
+  if (!m_deepLinkHandler || !m_deepLinkHandler->hasConnectPayload())
+  {
+    return;
+  }
+  if (authenticated())
+  {
+    return;
+  }
   if (!m_authManager)
   {
     return;
   }
 
-  m_bridgeApiSettings = bridgeApiSettings;
+  const QString authState = m_authManager->authState();
+  if (authState == QStringLiteral("waiting_callback") || authState == QStringLiteral("exchanging_token"))
+  {
+    return;
+  }
 
-  const QString webUrl = bridgeApiSettings.value(QStringLiteral("webUrl")).toString();
-  const QString apiUrl = bridgeApiSettings.value(QStringLiteral("apiUrl")).toString();
-  const QString authStartPath = bridgeApiSettings.value(QStringLiteral("authStartPath")).toString();
-  const QString authTokenPath = bridgeApiSettings.value(QStringLiteral("authTokenPath")).toString();
-  const int codeTtlSeconds = bridgeApiSettings.value(QStringLiteral("codeTtlSeconds"), 120).toInt();
-  QStringList allowedClientIds = bridgeApiSettings.value(QStringLiteral("allowedClientIds")).toStringList();
+  beginLogin();
+}
+
+void SessionManager::beginLogin()
+{
+  if (!m_authManager || !m_deepLinkHandler)
+  {
+    return;
+  }
+
+  if (!m_deepLinkHandler->hasConnectPayload())
+  {
+    const QString selfClientId = m_bridgeApiSettings.value(QStringLiteral("selfClientId")).toString().trimmed();
+    if (selfClientId.isEmpty())
+    {
+      setStatusMessage(QStringLiteral("Missing selfClientId in bridge configuration"));
+      notifyUiStateChanged();
+      return;
+    }
+    m_deepLinkHandler->blockSignals(true);
+    m_deepLinkHandler->seedSelfInitiated(selfClientId);
+    m_deepLinkHandler->blockSignals(false);
+    if (!m_deepLinkHandler->hasConnectPayload())
+    {
+      notifyUiStateChanged();
+      return;
+    }
+  }
+
+  const QString webUrl = m_bridgeApiSettings.value(QStringLiteral("webUrl")).toString();
+  const QString apiUrl = m_bridgeApiSettings.value(QStringLiteral("apiUrl")).toString();
+  const QString authStartPath = m_bridgeApiSettings.value(QStringLiteral("authStartPath")).toString();
+  const QString authTokenPath = m_bridgeApiSettings.value(QStringLiteral("authTokenPath")).toString();
+  const int codeTtlSeconds = m_bridgeApiSettings.value(QStringLiteral("codeTtlSeconds"), 120).toInt();
+  QStringList allowedClientIds = m_bridgeApiSettings.value(QStringLiteral("allowedClientIds")).toStringList();
   if (allowedClientIds.isEmpty())
   {
-    const QString configured = bridgeApiSettings.value(QStringLiteral("allowedClientIds")).toString();
+    const QString configured = m_bridgeApiSettings.value(QStringLiteral("allowedClientIds")).toString();
     if (!configured.trimmed().isEmpty())
     {
       const QStringList splitValues = configured.split(',', Qt::SkipEmptyParts);
@@ -170,6 +275,22 @@ void SessionManager::beginLogin(const QVariantMap &bridgeApiSettings)
   {
     setState(QStringLiteral("auth_in_progress"));
   }
+
+  notifyUiStateChanged();
+}
+
+void SessionManager::logout()
+{
+  if (m_deviceManager && m_deviceManager->connected())
+  {
+    disconnectDevice();
+  }
+  if (m_authManager)
+  {
+    m_authManager->logout();
+  }
+  setState(QStringLiteral("idle"));
+  notifyUiStateChanged();
 }
 
 void SessionManager::refreshPorts()
@@ -188,6 +309,14 @@ void SessionManager::connectDevice()
   }
 }
 
+void SessionManager::autoConnectDevice()
+{
+  if (m_deviceManager && m_deviceManager->autoConnect())
+  {
+    setState(QStringLiteral("device_connected"));
+  }
+}
+
 void SessionManager::disconnectDevice()
 {
   if (m_deviceManager)
@@ -197,31 +326,17 @@ void SessionManager::disconnectDevice()
   setState(QStringLiteral("authenticated"));
 }
 
-void SessionManager::startStreaming(const QVariantMap &bridgeApiSettings)
+void SessionManager::startStreaming()
 {
-  m_bridgeApiSettings = bridgeApiSettings;
-
-  if (!m_tokenStore || !m_tokenStore->hasValidToken())
-  {
-    setStatusMessage(QStringLiteral("Authenticate before starting stream"));
-    return;
-  }
-
   if (!m_deviceManager || !m_deviceManager->startStream())
   {
     return;
   }
 
-  const QString wsUrl = bridgeApiSettings.value(QStringLiteral("streamWsUrl")).toString();
-  if (wsUrl.isEmpty())
+  if (m_deviceManager->connected())
   {
-    setStatusMessage(QStringLiteral("Missing stream websocket URL in configuration"));
-    m_deviceManager->stopStream();
-    return;
+    setState(QStringLiteral("streaming"));
   }
-
-  m_streamUploader->connectToBackend(wsUrl, m_tokenStore->token());
-  setState(QStringLiteral("streaming"));
 }
 
 void SessionManager::stopStreaming()
@@ -230,11 +345,15 @@ void SessionManager::stopStreaming()
   {
     m_deviceManager->stopStream();
   }
-  if (m_streamUploader)
+
+  if (m_deviceManager && m_deviceManager->connected())
   {
-    m_streamUploader->disconnectFromBackend();
+    setState(QStringLiteral("device_connected"));
   }
-  setState(QStringLiteral("device_connected"));
+  else
+  {
+    setState(QStringLiteral("authenticated"));
+  }
 }
 
 void SessionManager::setSelectedPort(const QString &portName)
@@ -265,4 +384,36 @@ void SessionManager::setStatusMessage(const QString &message)
 
   m_statusMessage = message;
   emit statusMessageChanged();
+}
+
+void SessionManager::handleAuthenticatedForAutoConnect()
+{
+  if (!m_authManager || !m_authManager->authenticated())
+  {
+    m_autoConnectStartupDone = false;
+    return;
+  }
+
+  if (!m_autoConnectOnStartup || m_autoConnectStartupDone)
+  {
+    return;
+  }
+
+  if (m_deviceManager && m_deviceManager->connected())
+  {
+    return;
+  }
+
+  m_autoConnectStartupDone = true;
+
+  QMetaObject::invokeMethod(
+      this,
+      [this]()
+      {
+        if (m_deviceManager && !m_deviceManager->connected())
+        {
+          autoConnectDevice();
+        }
+      },
+      Qt::QueuedConnection);
 }

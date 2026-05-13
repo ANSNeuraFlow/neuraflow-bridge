@@ -1,4 +1,4 @@
-#include "qml_utils.h"
+#include "QmlUtils.h"
 
 QmlUtils::QmlUtils(QObject *parent) {}
 
