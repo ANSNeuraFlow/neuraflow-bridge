@@ -4,11 +4,9 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
-#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSerialPort>
 #include <QSerialPortInfo>
-#include <QTimer>
 
 #include <cmath>
 
@@ -27,7 +25,6 @@ namespace
   constexpr double kMicrovoltsPerCountGain24 =
       (4.5 / 24.0 / static_cast<double>((1 << 23) - 1)) * 1e6;
 
-  constexpr double kSyntheticSampleRateHz = 100.0;
   constexpr double kCytonDefaultSampleRateHz = 250.0;
 
   QString normalizedSerialPath(const QString &portName)
@@ -47,19 +44,13 @@ namespace
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent),
       m_serialPort(new QSerialPort(this)),
-      m_frameTimer(new QTimer(this)),
       m_connected(false),
       m_streaming(false),
-      m_debugMode(false),
-      m_sequence(0)
+      m_debugMode(false)
 {
-  m_frameTimer->setInterval(10);
-  connect(m_frameTimer, &QTimer::timeout, this, [this]()
-          { emit frameReady(buildSyntheticFrame()); });
-
   connect(m_serialPort, &QSerialPort::readyRead, this, &DeviceManager::onSerialReadyRead);
 
-  setEffectiveSampleRateHz(kSyntheticSampleRateHz);
+  setEffectiveSampleRateHz(kCytonDefaultSampleRateHz);
 }
 
 QStringList DeviceManager::availablePorts() const
@@ -149,16 +140,6 @@ QStringList DeviceManager::collectCytonPorts() const
 #endif
 
   return results;
-}
-
-bool DeviceManager::isSyntheticDebugPort() const
-{
-#if defined(Q_OS_LINUX)
-  return m_debugMode && m_selectedPort.contains(QStringLiteral("/tnt"));
-#else
-  Q_UNUSED(this);
-  return false;
-#endif
 }
 
 void DeviceManager::setDebugMode(bool debug)
@@ -404,16 +385,6 @@ bool DeviceManager::connectDevice()
   m_connected = true;
   emit connectedChanged();
 
-  if (isSyntheticDebugPort())
-  {
-    setEffectiveSampleRateHz(kSyntheticSampleRateHz);
-    m_protocolState = ProtocolState::Ready;
-    setBoardReady(true);
-    setConnectionStatus(QStringLiteral("Debug port (synthetic stream)"));
-    emit statusMessage(QStringLiteral("Connected to debug port %1 — synthetic EEG when streaming").arg(m_selectedPort));
-    return true;
-  }
-
   setEffectiveSampleRateHz(kCytonDefaultSampleRateHz);
   m_protocolState = ProtocolState::WaitingBanner;
   setConnectionStatus(QStringLiteral("Waiting for board…"));
@@ -435,13 +406,12 @@ void DeviceManager::disconnectDevice()
     stopStream();
   }
 
-  m_frameTimer->stop();
   m_connected = false;
   setBoardReady(false);
   setFirmwareVersion(QString());
   resetProtocolState();
   setConnectionStatus(QStringLiteral("Disconnected"));
-  setEffectiveSampleRateHz(kSyntheticSampleRateHz);
+  setEffectiveSampleRateHz(kCytonDefaultSampleRateHz);
 
   if (m_serialPort->isOpen())
   {
@@ -470,18 +440,6 @@ bool DeviceManager::startStream()
     return true;
   }
 
-  m_sequence = 0;
-
-  if (isSyntheticDebugPort())
-  {
-    m_streaming = true;
-    m_frameTimer->start();
-    emit streamingChanged();
-    setConnectionStatus(QStringLiteral("Streaming (synthetic)"));
-    emit statusMessage(QStringLiteral("Synthetic stream started"));
-    return true;
-  }
-
   sendByte(kCmdStartStream);
   m_protocolState = ProtocolState::Streaming;
   m_rxBuffer.clear();
@@ -500,9 +458,7 @@ void DeviceManager::stopStream()
     return;
   }
 
-  m_frameTimer->stop();
-
-  if (m_serialPort->isOpen() && !isSyntheticDebugPort())
+  if (m_serialPort->isOpen())
   {
     sendByte(kCmdStopStream);
   }
@@ -512,16 +468,9 @@ void DeviceManager::stopStream()
 
   if (m_connected && m_boardReady)
   {
-    if (isSyntheticDebugPort())
-    {
-      setConnectionStatus(QStringLiteral("Debug port ready"));
-    }
-    else
-    {
-      m_protocolState = ProtocolState::Ready;
-      m_rxBuffer.clear();
-      setConnectionStatus(QStringLiteral("Board ready"));
-    }
+    m_protocolState = ProtocolState::Ready;
+    m_rxBuffer.clear();
+    setConnectionStatus(QStringLiteral("Board ready"));
   }
 
   emit statusMessage(QStringLiteral("Device stream stopped"));
@@ -632,25 +581,4 @@ void DeviceManager::drainBinaryPackets()
     m_rxBuffer.remove(0, kPacketSize);
     emit frameReady(frame);
   }
-}
-
-QByteArray DeviceManager::buildSyntheticFrame()
-{
-  QByteArray frame;
-  frame.reserve(8 + 4 + (8 * 4));
-
-  QDataStream stream(&frame, QIODevice::WriteOnly);
-  stream.setByteOrder(QDataStream::LittleEndian);
-
-  const qint64 timestampMs = QDateTime::currentMSecsSinceEpoch();
-  stream << timestampMs;
-  stream << m_sequence++;
-
-  for (int i = 0; i < 8; ++i)
-  {
-    const float value = static_cast<float>(QRandomGenerator::global()->generateDouble() * 500.0 - 250.0);
-    stream << value;
-  }
-
-  return frame;
 }

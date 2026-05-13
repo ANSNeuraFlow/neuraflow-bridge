@@ -1,5 +1,9 @@
 #include "StreamUploader.h"
 
+#include <QAbstractSocket>
+#include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QUrl>
@@ -45,9 +49,12 @@ StreamUploader::StreamUploader(QObject *parent)
           scheduleReconnect();
         } });
 
-  connect(m_socket, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError)
+  connect(m_socket, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError code)
         {
-            emit statusMessage(QStringLiteral("Stream uploader socket error"));
+            const QString err = m_socket->errorString();
+            qWarning() << "Stream uploader WebSocket error:" << static_cast<int>(code) << err
+                       << "url:" << m_wsUrl;
+            emit statusMessage(QStringLiteral("EEG uplink: %1").arg(err));
             if (m_shouldReconnect)
             {
               scheduleReconnect();
@@ -72,6 +79,7 @@ void StreamUploader::connectToBackend(const QString &wsUrl, const QString &token
     return;
   }
 
+  const bool targetChanged = (wsUrl != m_wsUrl || token != m_token);
   m_wsUrl = wsUrl;
   m_token = token;
   m_shouldReconnect = true;
@@ -82,9 +90,16 @@ void StreamUploader::connectToBackend(const QString &wsUrl, const QString &token
     request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(token).toUtf8());
   }
 
-  if (m_socket->state() == QAbstractSocket::ConnectingState || m_socket->state() == QAbstractSocket::ConnectedState)
+  if (!targetChanged &&
+      (m_socket->state() == QAbstractSocket::ConnectedState ||
+       m_socket->state() == QAbstractSocket::ConnectingState))
   {
     return;
+  }
+
+  if (m_socket->state() != QAbstractSocket::UnconnectedState)
+  {
+    m_socket->abort();
   }
 
   m_socket->open(request);
@@ -95,10 +110,23 @@ void StreamUploader::disconnectFromBackend()
   m_shouldReconnect = false;
   m_reconnectTimer->stop();
 
-  if (m_socket->state() == QAbstractSocket::ConnectedState)
+  if (m_socket->state() != QAbstractSocket::UnconnectedState)
   {
-    m_socket->close();
+    m_socket->abort();
   }
+}
+
+void StreamUploader::sendBridgeMarker(const QString &marker)
+{
+  if (!m_connected || marker.isEmpty())
+  {
+    return;
+  }
+  QJsonObject root;
+  root.insert(QStringLiteral("type"), QStringLiteral("marker"));
+  root.insert(QStringLiteral("marker"), marker);
+  root.insert(QStringLiteral("ts"), static_cast<qint64>(QDateTime::currentMSecsSinceEpoch()));
+  m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
 }
 
 void StreamUploader::enqueueFrame(const QByteArray &frame)

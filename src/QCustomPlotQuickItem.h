@@ -30,8 +30,12 @@ public:
 
   Q_INVOKABLE void setSamples(const QVariantList &xs, const QVariantList &ys);
   void setData(const QVector<double> &xs, const QVector<double> &ys);
+  void setData(QVector<double> &&xs, QVector<double> &&ys);
   Q_INVOKABLE void setYRange(double yMin, double yMax);
   Q_INVOKABLE void setXRange(double xMin, double xMax);
+
+  void beginBatchUpdate();
+  void endBatchUpdate();
 
   void paint(QPainter *painter) override;
 
@@ -46,10 +50,12 @@ private:
   void ensurePlot();
   void applyStyle();
   void replotToPainter(QPainter *painter);
+  void scheduleUpdate();
 
   std::unique_ptr<QCustomPlot> m_plot;
   QColor m_lineColor{QStringLiteral("#3b82f6")};
   bool m_bottomAxisVisible{false};
+  bool m_batchUpdate{false};
   QVector<double> m_cachedX;
   QVector<double> m_cachedY;
 };

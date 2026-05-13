@@ -95,12 +95,6 @@ Item {
                     function onRenderTick() {
                         plot.refresh()
                     }
-                    function onAutoscaleBoundsChanged() {
-                        plot.refresh()
-                    }
-                    function onWindowSecondsChanged() {
-                        plot.refresh()
-                    }
                 }
                 Connections {
                     target: TimeSeriesController

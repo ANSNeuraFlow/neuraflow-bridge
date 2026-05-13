@@ -6,6 +6,8 @@
 #include <QFont>
 #include <QMargins>
 #include <QPainter>
+#include <QPicture>
+#include <utility>
 #include <QtMath>
 
 QCustomPlotQuickItem::QCustomPlotQuickItem(QQuickItem *parent) : QQuickPaintedItem(parent)
@@ -15,6 +17,23 @@ QCustomPlotQuickItem::QCustomPlotQuickItem(QQuickItem *parent) : QQuickPaintedIt
 }
 
 QCustomPlotQuickItem::~QCustomPlotQuickItem() = default;
+
+void QCustomPlotQuickItem::scheduleUpdate()
+{
+  if (!m_batchUpdate)
+    update();
+}
+
+void QCustomPlotQuickItem::beginBatchUpdate()
+{
+  m_batchUpdate = true;
+}
+
+void QCustomPlotQuickItem::endBatchUpdate()
+{
+  m_batchUpdate = false;
+  update();
+}
 
 void QCustomPlotQuickItem::ensurePlot()
 {
@@ -90,7 +109,7 @@ void QCustomPlotQuickItem::setLineColor(const QColor &c)
       return p;
     }());
   emit lineColorChanged();
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::setBottomAxisVisible(bool v)
@@ -101,7 +120,7 @@ void QCustomPlotQuickItem::setBottomAxisVisible(bool v)
   ensurePlot();
   applyStyle();
   emit bottomAxisVisibleChanged();
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::setSamples(const QVariantList &xs, const QVariantList &ys)
@@ -113,7 +132,7 @@ void QCustomPlotQuickItem::setSamples(const QVariantList &xs, const QVariantList
     m_cachedY.clear();
     if (m_plot && m_plot->graphCount() > 0)
       m_plot->graph(0)->data()->clear();
-    update();
+    scheduleUpdate();
     return;
   }
 
@@ -127,10 +146,17 @@ void QCustomPlotQuickItem::setSamples(const QVariantList &xs, const QVariantList
   }
   if (m_plot->graphCount() > 0)
     m_plot->graph(0)->setData(m_cachedX, m_cachedY, true);
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::setData(const QVector<double> &xs, const QVector<double> &ys)
+{
+  QVector<double> x = xs;
+  QVector<double> y = ys;
+  setData(std::move(x), std::move(y));
+}
+
+void QCustomPlotQuickItem::setData(QVector<double> &&xs, QVector<double> &&ys)
 {
   ensurePlot();
   if (!m_plot || xs.size() != ys.size() || xs.isEmpty())
@@ -139,15 +165,15 @@ void QCustomPlotQuickItem::setData(const QVector<double> &xs, const QVector<doub
     m_cachedY.clear();
     if (m_plot && m_plot->graphCount() > 0)
       m_plot->graph(0)->data()->clear();
-    update();
+    scheduleUpdate();
     return;
   }
 
-  m_cachedX = xs;
-  m_cachedY = ys;
+  m_cachedX = std::move(xs);
+  m_cachedY = std::move(ys);
   if (m_plot->graphCount() > 0)
     m_plot->graph(0)->setData(m_cachedX, m_cachedY, true);
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::setYRange(double yMin, double yMax)
@@ -156,7 +182,7 @@ void QCustomPlotQuickItem::setYRange(double yMin, double yMax)
   if (!m_plot)
     return;
   m_plot->yAxis->setRange(yMin, yMax);
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::setXRange(double xMin, double xMax)
@@ -165,13 +191,13 @@ void QCustomPlotQuickItem::setXRange(double xMin, double xMax)
   if (!m_plot)
     return;
   m_plot->xAxis->setRange(xMin, xMax);
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry)
 {
   QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
-  update();
+  scheduleUpdate();
 }
 
 void QCustomPlotQuickItem::paint(QPainter *painter)
@@ -189,9 +215,18 @@ void QCustomPlotQuickItem::replotToPainter(QPainter *painter)
   const int h = qMax(2, int(std::ceil(height())));
   m_plot->resize(w, h);
 
-  // Keep ranges if empty graph
-  m_plot->replot(QCustomPlot::rpImmediateRefresh);
-
-  const QPixmap px = m_plot->toPixmap(w, h);
-  painter->drawPixmap(0, 0, px);
+  // QCustomPlot::toPainter expects an active QCPPainter (same as QCustomPlot docs for QPainter
+  // interop): record to QPicture then play onto the incoming QPainter (nested active painters on the
+  // same device are not allowed).
+  QPicture picture;
+  picture.setBoundingRect(QRect(0, 0, w, h));
+  {
+    QCPPainter qcpPainter(&picture);
+    if (qcpPainter.isActive())
+    {
+      qcpPainter.setRenderHints(painter->renderHints(), true);
+      m_plot->toPainter(&qcpPainter, w, h);
+    }
+  }
+  picture.play(painter);
 }

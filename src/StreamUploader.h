@@ -21,6 +21,8 @@ public:
   Q_INVOKABLE void connectToBackend(const QString &wsUrl, const QString &token);
   Q_INVOKABLE void disconnectFromBackend();
   Q_INVOKABLE void enqueueFrame(const QByteArray &frame);
+  /// Sends JSON text marker on the EEG uplink (binary frames are EEG samples).
+  Q_INVOKABLE void sendBridgeMarker(const QString &marker);
 
 signals:
   void connectedChanged();

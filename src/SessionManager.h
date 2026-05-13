@@ -59,6 +59,8 @@ public:
   Q_INVOKABLE void startStreaming();
   Q_INVOKABLE void stopStreaming();
 
+  void publishStatus(const QString &message);
+
   void setSelectedPort(const QString &portName);
 
 signals:

@@ -11,6 +11,7 @@ QtObject {
     readonly property string bridgeAuthTokenPath: appSettings.bridgeApi.authTokenPath
     readonly property string bridgeDevicesPath: appSettings.bridgeApi.devicesPath
     readonly property string bridgeStreamWsUrl: appSettings.bridgeApi.streamWsUrl
+    readonly property string bridgeControlWsUrl: appSettings.bridgeApi.controlWsUrl
 
     readonly property var bridgeAuth: appSettings.bridgeAuth
     readonly property int bridgeCodeTtlSeconds: appSettings.bridgeAuth.codeTtlSeconds

@@ -9,8 +9,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Qml Quick SerialPort ShaderTools Network WebSockets LinguistTools Widgets PrintSupport)
 
-find_package(PkgConfig REQUIRED)
-
 qt_standard_project_setup(
     REQUIRES 6.8
     I18N_TRANSLATED_LANGUAGES pl
@@ -51,6 +49,8 @@ set(SOURCES
     BridgeDeviceClient.cpp
     StreamUploader.h
     StreamUploader.cpp
+    BackendController.h
+    BackendController.cpp
     SessionManager.h
     SessionManager.cpp
     DataProcessor.h

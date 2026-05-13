@@ -6,7 +6,6 @@
 #include <QtGlobal>
 
 class QSerialPort;
-class QTimer;
 
 /// Cyton/OpenBCI dongle serial: init (v, d, optional c), stream (b/s), 33-byte packets at 250 Hz.
 class DeviceManager : public QObject
@@ -72,7 +71,6 @@ private:
   };
 
   QStringList collectCytonPorts() const;
-  bool isSyntheticDebugPort() const;
 
   void resetProtocolState();
   void sendByte(char cmd);
@@ -85,7 +83,6 @@ private:
   void drainBinaryPackets();
   bool parseCytonPacket(const QByteArray &packet, QByteArray *outFrame);
   static qint32 interpret24bitSignedMsbFirst(const char *bytes);
-  QByteArray buildSyntheticFrame();
 
   void setBoardReady(bool ready);
   void setFirmwareVersion(const QString &v);
@@ -93,13 +90,11 @@ private:
   void setEffectiveSampleRateHz(double hz);
 
   QSerialPort *m_serialPort;
-  QTimer *m_frameTimer;
   QStringList m_availablePorts;
   QString m_selectedPort;
   bool m_connected;
   bool m_streaming;
   bool m_debugMode;
-  quint32 m_sequence;
 
   QByteArray m_rxBuffer;
   ProtocolState m_protocolState{ProtocolState::Idle};
