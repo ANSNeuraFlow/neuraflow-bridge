@@ -80,10 +80,27 @@ bool DeviceManager::debugMode() const
 
 QStringList DeviceManager::collectCytonPorts() const
 {
+  // Description prefixes reported by the OpenBCI Cyton dongle across platforms.
+  // Linux  : "FT231X USB UART" (FTDI kernel driver)
+  // Windows: CP210x driver → "Silicon Labs CP210x USB to UART Bridge",
+  //                           "USB-SERIAL CP2104", "CP2102 USB to UART Bridge Controller"
+  //          FTDI driver  → "USB Serial Port", "FT231X USB UART"
+  // macOS  : "FT231X USB UART" or "CP2102 USB to UART Bridge Controller"
   static const QStringList kDongleDescPrefixes = {
       QStringLiteral("FT231X USB UART"),
       QStringLiteral("VCP"),
+      // Windows CP210x variants
+      QStringLiteral("Silicon Labs CP210x"),
+      QStringLiteral("CP210"),                 // CP2102, CP2104, CP2109…
+      QStringLiteral("USB-SERIAL CP"),
+      // Windows FTDI variants
+      QStringLiteral("USB Serial Port"),
   };
+
+  // Known USB Vendor IDs for OpenBCI Cyton dongle hardware.
+  // VID 0x10C4 = Silicon Labs (CP2104)
+  // VID 0x0403 = FTDI
+  static const QList<quint16> kDongleVids = { 0x10C4, 0x0403 };
 
   QStringList results;
 
@@ -91,15 +108,35 @@ QStringList DeviceManager::collectCytonPorts() const
   for (const QSerialPortInfo &info : infos)
   {
     const QString desc = info.description();
+
+    // Primary match: description prefix
     bool matchesDongle = false;
     for (const QString &prefix : kDongleDescPrefixes)
     {
-      if (desc.startsWith(prefix))
+      if (desc.startsWith(prefix, Qt::CaseInsensitive))
       {
         matchesDongle = true;
         break;
       }
     }
+
+    // Fallback: VID/PID allowlist (catches renamed/generic drivers on Windows)
+    if (!matchesDongle && info.hasVendorIdentifier())
+    {
+      for (quint16 vid : kDongleVids)
+      {
+        if (info.vendorIdentifier() == vid)
+        {
+          matchesDongle = true;
+          qDebug() << "DeviceManager: matched dongle by VID"
+                   << Qt::hex << vid
+                   << "port" << info.portName()
+                   << "desc" << desc;
+          break;
+        }
+      }
+    }
+
     if (!matchesDongle)
     {
       continue;

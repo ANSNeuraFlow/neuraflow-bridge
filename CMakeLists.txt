@@ -140,6 +140,16 @@ target_include_directories(NeuraFlowBridgeApp PRIVATE
     ${SRC_DIR}/external/qcustomplot
 )
 
+# qcustomplot.cpp is a massive amalgamated file that exceeds the default Windows
+# PE/COFF section limit (32767). Pass -Wa,-mbig-obj to the assembler so it
+# emits a big-object COFF file that supports up to ~16M sections.
+if (MINGW)
+    set_source_files_properties(
+        ${SRC_DIR}/external/qcustomplot/qcustomplot.cpp
+        PROPERTIES COMPILE_FLAGS "-Wa,-mbig-obj"
+    )
+endif()
+
 target_link_libraries(NeuraFlowBridgeApp PRIVATE
     Qt6::Qml
     Qt6::Quick
