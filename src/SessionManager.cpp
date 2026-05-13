@@ -356,6 +356,11 @@ void SessionManager::stopStreaming()
   }
 }
 
+void SessionManager::publishStatus(const QString &message)
+{
+  setStatusMessage(message);
+}
+
 void SessionManager::setSelectedPort(const QString &portName)
 {
   if (m_deviceManager)

@@ -73,15 +73,19 @@ Item {
         }
 
         GridLayout {
+            id: dashCardsGrid
             Layout.fillWidth: true
             columns: 2
             columnSpacing: 16
             rowSpacing: 0
 
+            readonly property real cardsRowHeight:
+                Math.max(connectionCol.implicitHeight + 36, boardCol.implicitHeight + 36)
+
             Card {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 200
-                implicitHeight: connectionCol.implicitHeight + 36
+                implicitHeight: dashCardsGrid.cardsRowHeight
 
                 ColumnLayout {
                     id: connectionCol
@@ -264,7 +268,7 @@ Item {
             Card {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 200
-                implicitHeight: boardCol.implicitHeight + 36
+                implicitHeight: dashCardsGrid.cardsRowHeight
 
                 ColumnLayout {
                     id: boardCol
@@ -275,7 +279,7 @@ Item {
                     spacing: 8
 
                     SectionTitle {
-                        text: "Board"
+                        text: "Status"
                     }
 
                     Label {
@@ -297,7 +301,7 @@ Item {
 
                     Label {
                         visible: SessionManager.deviceConnected
-                        text: SessionManager.boardReady ? "Board ready — you can start streaming"
+                        text: SessionManager.boardReady ? "Board ready — streaming is controlled by the server"
                               : "Initializing protocol (v / d / c)…"
                         color: SessionManager.boardReady ? "#34d399" : "#fbbf24"
                         font.pixelSize: 12
@@ -307,7 +311,46 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        Layout.topMargin: 4
+                        spacing: 10
+
+                        StatusDot {
+                            active: SessionManager.deviceStreaming
+                            color: active ? "#10b981" : "#64748b"
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: SessionManager.deviceStreaming ? "Device streaming"
+                                                                   : "Device idle"
+                            color: "#cbd5e1"
+                            font.pixelSize: 13
+                            font.bold: true
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        StatusDot {
+                            active: BackendController.connected
+                            color: active ? "#10b981" : "#64748b"
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: BackendController.connected ? "Backend control connected"
+                                                                : "Backend control disconnected"
+                            color: "#cbd5e1"
+                            font.pixelSize: 13
+                            font.bold: true
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
                         spacing: 10
 
                         StatusDot {
@@ -317,58 +360,13 @@ Item {
 
                         Label {
                             Layout.fillWidth: true
-                            text: SessionManager.streamConnected ? "Cloud uploader connected"
-                                                                   : "Cloud uploader idle"
+                            text: SessionManager.streamConnected ? "EEG uplink connected"
+                                                                   : "EEG uplink idle"
                             color: "#cbd5e1"
                             font.pixelSize: 13
                             font.bold: true
                             wrapMode: Text.Wrap
                         }
-                    }
-                }
-            }
-        }
-
-        Card {
-            Layout.fillWidth: true
-            implicitHeight: streamingCol.implicitHeight + 36
-
-            ColumnLayout {
-                id: streamingCol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: 18
-                spacing: 10
-
-                SectionTitle {
-                    text: "Streaming"
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    BaseButton {
-                        Layout.fillWidth: true
-                        text: "Start Streaming"
-                        bgColor: "#10b981"
-                        bgHover: "#34d399"
-                        bgPressed: "#059669"
-                        enabled: SessionManager.deviceConnected
-                                 && SessionManager.boardReady
-                                 && !SessionManager.deviceStreaming
-                        onClicked: SessionManager.startStreaming()
-                    }
-
-                    BaseButton {
-                        Layout.fillWidth: true
-                        text: "Stop Streaming"
-                        bgColor: "#ef4444"
-                        bgHover: "#f87171"
-                        bgPressed: "#dc2626"
-                        enabled: SessionManager.deviceStreaming
-                        onClicked: SessionManager.stopStreaming()
                     }
                 }
             }

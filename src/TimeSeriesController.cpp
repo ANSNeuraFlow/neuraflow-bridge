@@ -4,6 +4,7 @@
 #include "QCustomPlotQuickItem.h"
 
 #include <array>
+#include <utility>
 
 namespace
 {
@@ -143,16 +144,21 @@ void TimeSeriesController::updatePlot(QCustomPlotQuickItem *plot, int channelInd
   if (!plot || !m_processor)
     return;
 
+  plot->beginBatchUpdate();
   if (channelIndex < 0 || channelIndex >= numChannels() ||
       !channelVisible(channelIndex))
   {
-    plot->setData({}, {});
+    plot->setData(QVector<double>{}, QVector<double>{});
+    plot->setXRange(-m_processor->windowSeconds(), 0);
+    plot->setYRange(yMinForChannel(channelIndex), yMaxForChannel(channelIndex));
+    plot->endBatchUpdate();
     return;
   }
 
-  const QVector<double> xs = m_processor->timeAxisSecondsVec(channelIndex);
-  const QVector<double> ys = m_processor->channelSamplesVec(channelIndex);
-  plot->setData(xs, ys);
+  QVector<double> xs = m_processor->timeAxisSecondsVec(channelIndex);
+  QVector<double> ys = m_processor->channelSamplesVec(channelIndex);
+  plot->setData(std::move(xs), std::move(ys));
   plot->setXRange(-m_processor->windowSeconds(), 0);
   plot->setYRange(yMinForChannel(channelIndex), yMaxForChannel(channelIndex));
+  plot->endBatchUpdate();
 }

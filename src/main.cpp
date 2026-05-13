@@ -25,6 +25,7 @@
 #include "DeviceManager.h"
 #include "BridgeDeviceClient.h"
 #include "StreamUploader.h"
+#include "BackendController.h"
 #include "SessionManager.h"
 #include "DataProcessor.h"
 #include "TimeSeriesController.h"
@@ -106,6 +107,13 @@ int main(int argc, char *argv[])
   bridgeApiGroup.insert("authTokenPath", getSetting<QString>(settings, "BridgeApi/authTokenPath", false, "/api/v1/bridge/auth/token"));
   bridgeApiGroup.insert("devicesPath", getSetting<QString>(settings, "BridgeApi/devicesPath", false, "/api/v1/bridge/devices"));
   bridgeApiGroup.insert("streamWsUrl", getSetting<QString>(settings, "BridgeApi/streamWsUrl", false, "ws://localhost:4000/api/v1/bridge/stream"));
+  bridgeApiGroup.insert(
+      "controlWsUrl",
+      getSetting<QString>(
+          settings,
+          "BridgeApi/controlWsUrl",
+          false,
+          QStringLiteral("ws://localhost:4000/api/v1/bridge/control")));
   appSettings.insert("bridgeApi", bridgeApiGroup);
 
   QVariantMap bridgeAuthGroup;
@@ -194,6 +202,7 @@ int main(int argc, char *argv[])
   deviceManager.setDebugMode(debugMode);
   BridgeDeviceClient bridgeDeviceClient;
   StreamUploader streamUploader;
+  BackendController backendController;
   SessionManager sessionManager(
       &authManager,
       &deviceManager,
@@ -218,7 +227,70 @@ int main(int argc, char *argv[])
 
   QObject::connect(&deviceManager, &DeviceManager::frameReady,
                    &dataProcessor, &DataProcessor::ingestFrame);
+  QObject::connect(&deviceManager, &DeviceManager::frameReady,
+                   &streamUploader, &StreamUploader::enqueueFrame);
 
+  auto connectBridgeWebSockets = [&]()
+  {
+    if (!tokenStore.hasValidToken())
+    {
+      backendController.disconnectFromBackend();
+      streamUploader.disconnectFromBackend();
+      return;
+    }
+    const QString token = tokenStore.token();
+    const QString controlUrl = bridgeRuntimeSettings.value(QStringLiteral("controlWsUrl")).toString();
+    const QString streamUrl = bridgeRuntimeSettings.value(QStringLiteral("streamWsUrl")).toString();
+    backendController.connectToBackend(controlUrl, token);
+    streamUploader.connectToBackend(streamUrl, token);
+  };
+
+  QObject::connect(&tokenStore, &TokenStore::tokenChanged, &app,
+                   [&]()
+                   {
+                     if (tokenStore.hasValidToken())
+                     {
+                       connectBridgeWebSockets();
+                     }
+                     else
+                     {
+                       backendController.disconnectFromBackend();
+                       streamUploader.disconnectFromBackend();
+                     }
+                   });
+
+  QObject::connect(&backendController, &BackendController::startStreamingRequested,
+                   &sessionManager, &SessionManager::startStreaming);
+  QObject::connect(&backendController, &BackendController::stopStreamingRequested,
+                   &sessionManager, &SessionManager::stopStreaming);
+
+  QObject::connect(&backendController, &BackendController::markerReceived, &streamUploader,
+                   &StreamUploader::sendBridgeMarker);
+
+  QObject::connect(&deviceManager, &DeviceManager::streamingChanged, &backendController,
+                   [&]()
+                   {
+                     backendController.sendStreamingStatus(deviceManager.streaming());
+                   });
+
+  QObject::connect(&backendController, &BackendController::connectedChanged, &backendController,
+                   [&]()
+                   {
+                     if (backendController.connected())
+                     {
+                       backendController.sendStreamingStatus(deviceManager.streaming());
+                     }
+                   });
+
+  if (tokenStore.hasValidToken())
+  {
+    connectBridgeWebSockets();
+  }
+
+  QObject::connect(&backendController, &BackendController::statusMessage, &sessionManager,
+                   &SessionManager::publishStatus);
+
+  engine->rootContext()->setContextProperty("BackendController", &backendController);
   engine->rootContext()->setContextProperty("SessionManager", &sessionManager);
   engine->rootContext()->setContextProperty("DataProcessor", &dataProcessor);
   engine->rootContext()->setContextProperty("TimeSeriesController", &timeSeriesController);

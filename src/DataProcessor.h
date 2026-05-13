@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QByteArray>
-#include <QElapsedTimer>
+#include <cmath>
 #include <QMutex>
 #include <QObject>
 #include <QTimer>
@@ -37,9 +37,8 @@ public:
 
 public slots:
     void ingestFrame(const QByteArray &frame);
-    /// Match DeviceManager synthetic frame cadence unless set explicitly.
     void setSampleRateFromFrameIntervalMs(int intervalMs);
-    /// Sample rate in Hz (e.g. 250 for Cyton, 100 for 10 ms synthetic timer).
+    /// Sample rate in Hz (e.g. 250 for Cyton; derived from frame interval if using setSampleRateFromFrameIntervalMs).
     void setSampleRateHz(double hz);
 
     Q_INVOKABLE QVariantList timeAxisSeconds(int channelIndex) const;
@@ -58,7 +57,7 @@ signals:
     void renderTick();
 
 private:
-    void parseAndPush(const QByteArray &frame);
+    void parseAndPush(const QByteArray &frame, int maxLen);
     void trimBuffers();
     void recomputeRms();
     void maybeUpdateAutoscale();
@@ -66,15 +65,34 @@ private:
 
     static constexpr int kChannelCount = 8;
     static constexpr double kDefaultWindowSec = 5.0;
-    static constexpr int kRenderIntervalMs = 33;  // ~30 Hz
+    /// Fixed ring capacity: max supported rate * max window (see setWindowSeconds clamp) + margin.
+    static constexpr int kRingStorageSamples = static_cast<int>(std::ceil(500.0 * 20.0)) + 128;
+    static constexpr int kRenderIntervalMs = 50;  // ~20 Hz
+
+    struct ChannelSamplesRing
+    {
+        QVector<double> storage;
+        int head{0};
+        int count{0};
+
+        ChannelSamplesRing();
+        void push(double value, int maxLen);
+        void trimToMax(int maxLen);
+        [[nodiscard]] int size() const { return count; }
+        [[nodiscard]] double at(int linearIndex) const;
+        [[nodiscard]] QVector<double> linearize() const;
+
+    private:
+        [[nodiscard]] int capacity() const { return storage.size(); }
+    };
 
     int m_channelCount{kChannelCount};
-    double m_sampleRateHz{250.0};  // Cyton default; synthetic/debug uses DeviceManager rate
+    double m_sampleRateHz{250.0};  // Cyton default; follows DeviceManager effectiveSampleRateHz when wired in main
     double m_windowSeconds{kDefaultWindowSec};
     /// 0 = Auto (µV symmetric scale derived from buffered signal)
     int m_verticalScaleUv{200};
 
-    QVector<QVector<double>> m_buffers;  // per-channel time series newest at end
+    QVector<ChannelSamplesRing> m_buffers;
 
     QVector<double> m_rmsUv;
     QVector<double> m_autoscaleYMin;
